@@ -18,7 +18,32 @@ connectDB();
 const app = express();
 
 // 4. GLOBAL MIDDLEWARE MATRIX
-app.use(cors());
+
+// ==========================================
+// SECURITY MATRIX: CORS Whitelist Configuration
+// ==========================================
+const allowedOrigins = [
+  'http://localhost:5173',                 // Default Vite dev server port
+  'http://localhost:3000',                 // Default Create React App port
+  'https://shop-inventory-web.vercel.app' // Live production frontend URL
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like Postman, mobile configurations, or server-to-server calls)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Blocked by security core: CORS policy violation.'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
