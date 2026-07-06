@@ -1,8 +1,11 @@
 import Item from "../models/items.js";
 import xlsx from "xlsx";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse"); // @desc    Fetch only the live inventory manifest ledger belonging to the active user
+// =========================================================================
+// SERVERLESS COMPATIBLE DEPENDENCY INTERFACE
+// =========================================================================
+import pdfParse from "pdf-parse-fork"; 
+
+// @desc    Fetch only the live inventory manifest ledger belonging to the active user
 // @route   GET /api/inventory
 export const getInventory = async (req, res) => {
   try {
@@ -54,7 +57,7 @@ export const createItem = async (req, res) => {
       image,
     });
 
-    const savedItem = await newItem.save();
+    const savedItem = newItem.save();
     res.status(201).json({
       id: savedItem._id,
       name: savedItem.name,
