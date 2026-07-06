@@ -2,8 +2,8 @@ import express from 'express';
 import multer from 'multer';
 import { getInventory, createItem, deleteItem, updateItem, importInventory } from '../controllers/inventoryController.js';
 import { protect } from '../middleware/authMiddleware.js';
-
 const router = express.Router();
+import pdf from 'pdf-parse-fork';
 
 // Configure temporary in-memory storage buffer for file imports
 const upload = multer({ storage: multer.memoryStorage() });
