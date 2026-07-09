@@ -1,15 +1,12 @@
 import Item from "../models/items.js";
 import xlsx from "xlsx";
-// =========================================================================
-// SERVERLESS COMPATIBLE DEPENDENCY INTERFACE
-// =========================================================================
 import pdfParse from "pdf-parse-fork"; 
+import { uploadToCloudinary, deleteFromCloudinary } from "../utils/cloudinary.js"; // 🔥 Hooked in deletion helper
 
 // @desc    Fetch only the live inventory manifest ledger belonging to the active user
 // @route   GET /api/inventory
 export const getInventory = async (req, res) => {
   try {
-    // CRITICAL: Filter documents strictly matching the authenticated user's ID
     const items = await Item.find({ userId: req.user.id }).sort({
       createdAt: -1,
     });
@@ -36,6 +33,14 @@ export const getInventory = async (req, res) => {
 // @route   POST /api/inventory
 export const createItem = async (req, res) => {
   try {
+    let imageUrl = "";
+
+    if (req.file) {
+      imageUrl = await uploadToCloudinary(req.file.buffer);
+    } else if (req.body.image) {
+      imageUrl = req.body.image; 
+    }
+
     const {
       name,
       retailPrice,
@@ -43,21 +48,20 @@ export const createItem = async (req, res) => {
       quantity,
       category,
       description,
-      image,
     } = req.body;
 
     const newItem = new Item({
-      userId: req.user.id, // CRITICAL: Embed the owner's credential token pointer link
+      userId: req.user.id, 
       name,
       retailPrice: parseFloat(retailPrice),
       wholesalePrice: parseFloat(wholesalePrice),
       quantity: parseInt(quantity, 10),
       category: category || "General",
       description,
-      image,
+      image: imageUrl, 
     });
 
-    const savedItem = newItem.save();
+    const savedItem = await newItem.save(); 
     res.status(201).json({
       id: savedItem._id,
       name: savedItem.name,
@@ -69,38 +73,42 @@ export const createItem = async (req, res) => {
       image: savedItem.image,
     });
   } catch (error) {
+    console.error("Creation endpoint pipeline exception:", error);
     res
       .status(400)
       .json({ error: "Data normalization error. Verify numeric data rules." });
   }
 };
 
-// @desc    Target and securely remove a user's specific line item from memory
+// @desc    Target and securely remove a user's specific line item from memory and Cloudinary
 // @route   DELETE /api/inventory/:id
 export const deleteItem = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // CRITICAL: Ensure the item matches both the requested ID AND belongs to the logged-in user
-    const deletedItem = await Item.findOneAndDelete({
-      _id: id,
-      userId: req.user.id,
-    });
+    // 1. Locate entry parameters first to check for an existing image path
+    const targetItem = await Item.findOne({ _id: id, userId: req.user.id });
 
-    if (!deletedItem) {
-      return res
-        .status(404)
-        .json({
-          error:
-            "Product entry identifier index pointer matching not found or unauthorized access.",
-        });
+    if (!targetItem) {
+      return res.status(404).json({
+        error: "Product entry identifier index pointer matching not found or unauthorized access.",
+      });
     }
+
+    // 2. 🔥 Cloud Storage Cleanup: If it has a valid Cloudinary secure asset URL, purge it
+    if (targetItem.image && targetItem.image.includes('res.cloudinary.com')) {
+      await deleteFromCloudinary(targetItem.image);
+    }
+
+    // 3. Remove document record from your local cluster database index completely
+    await Item.deleteOne({ _id: id, userId: req.user.id });
 
     res.json({
       success: true,
-      message: "Stock line clean erasure successful.",
+      message: "Stock line and linked cloud assets clean erasure successful.",
     });
   } catch (error) {
+    console.error("Deletion endpoint exception cascade:", error);
     res
       .status(500)
       .json({ error: "Internal pipeline error executing line wipe." });
@@ -112,25 +120,32 @@ export const deleteItem = async (req, res) => {
 export const updateItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    let updates = { ...req.body };
 
-    // Target the specific document ensuring it belongs strictly to the active user
+    // 1. Locate the item to evaluate if an active image update sequence is running
+    const existingItem = await Item.findOne({ _id: id, userId: req.user.id });
+    if (!existingItem) {
+      return res.status(404).json({
+        error: "Product entry identifier index pointer matching not found or unauthorized.",
+      });
+    }
+
+    // 2. 🔥 Active Replacement Guard: Drop the old image before saving the new stream buffer
+    if (req.file) {
+      if (existingItem.image && existingItem.image.includes('res.cloudinary.com')) {
+        await deleteFromCloudinary(existingItem.image);
+      }
+      const newImageUrl = await uploadToCloudinary(req.file.buffer);
+      updates.image = newImageUrl;
+    }
+
+    // 3. Persist modifications down to MongoDB Atlas
     const updatedItem = await Item.findOneAndUpdate(
       { _id: id, userId: req.user.id },
       { $set: updates },
-      { new: true, runValidators: true }, // Return the fresh updated doc and run schema rules
+      { new: true, runValidators: true }, 
     );
 
-    if (!updatedItem) {
-      return res
-        .status(404)
-        .json({
-          error:
-            "Product entry identifier index pointer matching not found or unauthorized.",
-        });
-    }
-
-    // Format the updated document to match your frontend data expectations
     res.json({
       id: updatedItem._id,
       name: updatedItem.name,
@@ -142,6 +157,7 @@ export const updateItem = async (req, res) => {
       image: updatedItem.image,
     });
   } catch (error) {
+    console.error("Update endpoint pipeline exception:", error);
     res
       .status(400)
       .json({
@@ -164,7 +180,6 @@ export const importInventory = async (req, res) => {
     const mimeType = req.file.mimetype;
     const originalName = req.file.originalname.toLowerCase();
 
-    // 📊 STRICT EXCEL / CSV VERIFICATION & INGESTION PIPELINE
     if (
       mimeType.includes('spreadsheetml') || 
       mimeType.includes('excel') || 
@@ -178,36 +193,29 @@ export const importInventory = async (req, res) => {
       const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
       parsedItems = rawData.map((row, index) => {
-        // 1. Lowercase keys and strip all spaces/underscores for flawless cross-platform header mapping
         const cleanRow = {};
         Object.keys(row).forEach(key => {
           const normalizedKey = key.toLowerCase().replace(/[\s_]/g, '');
           cleanRow[normalizedKey] = row[key];
         });
 
-        // 2. Extract values based on flexible variation headers
         const name = cleanRow.name || cleanRow.productname || cleanRow.item;
-        
-        // Mongoose requires true Numbers or parsable floats/ints
         const retailPrice = parseFloat(cleanRow.retailprice || cleanRow.price || cleanRow.retail);
         const wholesalePrice = parseFloat(cleanRow.wholesaleprice || cleanRow.wholesale || cleanRow.cost);
         const quantity = parseInt(cleanRow.quantity || cleanRow.qty || cleanRow.stock, 10);
         
-        // Optional structural values (will default to schema conditions if missing)
         const category = cleanRow.category || cleanRow.type || 'General';
         const description = cleanRow.description || cleanRow.details || '';
         const image = cleanRow.image || cleanRow.img || '';
 
-        // 3. Schema Enforcement Verification Check
         if (!name || isNaN(retailPrice) || isNaN(wholesalePrice) || isNaN(quantity)) {
           throw new Error(`Row ${index + 2} has missing or malformed required metrics. Make sure Name, Retail Price, Wholesale Price, and Quantity are valid numbers.`);
         }
 
-        // 4. Return formatted objects matching your itemSchema fields exactly
         return {
-          userId: req.user.id, // Linked securely to your authenticated session model wrapper
+          userId: req.user.id, 
           name: name.trim(),
-          retailPrice: Math.max(0, retailPrice), // Prevents negative numbers violating min: 0
+          retailPrice: Math.max(0, retailPrice), 
           wholesalePrice: Math.max(0, wholesalePrice),
           quantity: Math.max(0, quantity),
           category: category.trim(),
@@ -229,7 +237,6 @@ export const importInventory = async (req, res) => {
       });
     }
 
-    // High-speed transaction ingestion directly down to MongoDB indexes
     const insertedDocs = await Item.insertMany(parsedItems);
 
     return res.json({ 
@@ -240,7 +247,6 @@ export const importInventory = async (req, res) => {
 
   } catch (error) {
     console.error('Import pipeline processing failure:', error);
-    // Explicitly captures our custom layout row validation errors and handles them gracefully 
     return res.status(400).json({ success: false, error: error.message });
   }
 };
